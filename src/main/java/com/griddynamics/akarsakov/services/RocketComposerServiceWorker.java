@@ -5,55 +5,36 @@ import com.griddynamics.akarsakov.entities.Satellite;
 import com.griddynamics.akarsakov.repositories.RocketRepository;
 import com.griddynamics.akarsakov.services.search.SearchCondition;
 
-import java.math.BigDecimal;
 import java.util.*;
 import java.util.function.Predicate;
 
 import static com.griddynamics.akarsakov.utils.TextSearchConditionsTranslator.buildSearchRegex;
+import static com.griddynamics.akarsakov.utils.NumberUtils.isNumeric;
+import static com.griddynamics.akarsakov.utils.NumberUtils.compareParamAndConditionValues;
 
-final class RocketComposerServiceWorker {
+public final class RocketComposerServiceWorker {
     private final RocketRepository rocketRepository;
 
-    RocketComposerServiceWorker(RocketRepository rocketRepository) {
+    public RocketComposerServiceWorker(RocketRepository rocketRepository) {
         this.rocketRepository = rocketRepository;
     }
 
-    Rocket searchByConditions(List<SearchCondition> conditions) {
-        Rocket rocket;
+    public Rocket searchByConditions(List<SearchCondition> conditions) {
+        List<SearchCondition> nonNullConditions = conditions != null ?
+                conditions.stream().filter(Objects::nonNull).toList() :
+                null;
 
         Predicate<SearchCondition> hasId = (condition) -> condition.isAttributeNameSimilar("id");
-        SearchCondition rocketIdCondition = extractRocketIdCondition(conditions, hasId);
+        SearchCondition rocketIdCondition = extractRocketIdCondition(nonNullConditions, hasId);
         UUID rocketId = (UUID) rocketIdCondition.value();
 
-        List<Rocket> rockets;
-
-        if (rocketId != null) {
-            switch (rocketIdCondition.condition()) {
-                case NOT_EQUALS -> rockets = rocketRepository.findByIdNotIn(List.of(rocketId));
-                case EQUALS -> {
-                    rockets = new ArrayList<>();
-                    rockets.add(rocketRepository.findById(rocketId).orElse(null));
-                }
-                default -> throw new IllegalArgumentException("Search condition "
-                        + rocketIdCondition.condition().name()
-                        + " is not supported for the rocket ID parameter");
-            }
-
-            rocket = filterRockets(rockets, conditions.stream().filter(hasId.negate()).toList());
-        } else {
-            Predicate<SearchCondition> hasType = (condition) -> condition.isAttributeNameSimilar("type");
-            Predicate<SearchCondition> hasMissionName = (condition) -> condition.isAttributeNameSimilar("missionName");
-
-            rockets = findRockets(conditions, hasType, hasMissionName);
-            rocket = filterRockets(rockets,
-                    sanitizeConditions(conditions, List.of(hasId, hasType, hasMissionName)));
-        }
-
-        return rocket;
+        return rocketId != null ?
+                findRocketWithIdInConditions(rocketId, rocketIdCondition, nonNullConditions.stream().filter(hasId.negate()).toList()) :
+                findRocketWithoutIdInConditions(nonNullConditions, hasId);
     }
 
-    SearchCondition extractRocketIdCondition(List<SearchCondition> conditions, Predicate<SearchCondition> hasId) {
-        if (conditions == null || hasId == null) {
+    private SearchCondition extractRocketIdCondition(List<SearchCondition> conditions, Predicate<SearchCondition> hasId) {
+        if (conditions == null) {
             return new SearchCondition(null, null, null);
         }
         return conditions.stream()
@@ -62,42 +43,47 @@ final class RocketComposerServiceWorker {
                 .orElse(new SearchCondition(null, null, null));
     }
 
-    Rocket filterRocket(Rocket rocket, List<SearchCondition> conditions) {
-        if (rocket == null) {
-            return null;
-        }
-        if (conditions == null) {
-            return rocket;
+    private Rocket findRocketWithIdInConditions(UUID rocketId,
+                                                SearchCondition rocketIdCondition,
+                                                List<SearchCondition> otherConditions) {
+        List<Rocket> rockets;
+
+        switch (rocketIdCondition.condition()) {
+            case NOT_EQUALS -> rockets = rocketRepository.findByIdNotIn(List.of(rocketId));
+            case EQUALS -> {
+                rockets = new ArrayList<>();
+                rockets.add(rocketRepository.findById(rocketId).orElse(null));
+            }
+            default -> throw new IllegalArgumentException("Search condition "
+                    + rocketIdCondition.condition().name()
+                    + " is not supported for the rocket ID parameter");
         }
 
-        boolean everythingMatches = conditions.stream().allMatch(condition -> checkCondition(rocket, condition));
-        return everythingMatches ? rocket : null;
+        return filterRockets(rockets, otherConditions);
     }
 
-    List<Rocket> findRockets(List<SearchCondition> conditions,
-                             Predicate<SearchCondition> hasType,
-                             Predicate<SearchCondition> hasMissionName) {
+    private Rocket findRocketWithoutIdInConditions(List<SearchCondition> conditions, Predicate<SearchCondition> hasId) {
+        List<Rocket> rockets;
+
+        Predicate<SearchCondition> hasType = (condition) -> condition.isAttributeNameSimilar("type");
+        Predicate<SearchCondition> hasMissionName = (condition) -> condition.isAttributeNameSimilar("missionName");
+
+        rockets = findRockets(conditions, hasType, hasMissionName);
+        return filterRockets(rockets, sanitizeConditions(conditions, List.of(hasId, hasType, hasMissionName)));
+    }
+
+    private List<Rocket> findRockets(List<SearchCondition> conditions,
+                                     Predicate<SearchCondition> hasType,
+                                     Predicate<SearchCondition> hasMissionName) {
         List<Rocket> candidateRockets = new LinkedList<>();
 
         if (conditions == null) {
             return candidateRockets;
         }
 
-        SearchCondition typeCondition = null;
-        SearchCondition missionNameCondition = null;
-
-        int foundConditions = 0;
-        Iterator<SearchCondition> iterator = conditions.listIterator();
-        while (foundConditions < 2 && iterator.hasNext()) {
-            SearchCondition condition = iterator.next();
-            if (hasType != null && hasType.test(condition)) {
-                typeCondition = condition;
-                foundConditions++;
-            } else if (hasMissionName != null && hasMissionName.test(condition)) {
-                missionNameCondition = condition;
-                foundConditions++;
-            }
-        }
+        SearchCondition[] mainSearchConditions = findMainRocketSearchConditions(conditions, hasType, hasMissionName);
+        SearchCondition typeCondition = mainSearchConditions[0];
+        SearchCondition missionNameCondition = mainSearchConditions[1];
 
         if (typeCondition == null && missionNameCondition == null) {
             candidateRockets = rocketRepository.findAll();
@@ -117,13 +103,17 @@ final class RocketComposerServiceWorker {
         return candidateRockets;
     }
 
-    List<SearchCondition> sanitizeConditions(List<SearchCondition> conditions,
-                                             List<Predicate<SearchCondition>> excludePredicates) {
+    private Rocket filterRockets(List<Rocket> rockets, List<SearchCondition> conditions) {
+        return rockets.stream()
+                .filter(rocket -> filterRocket(rocket, conditions) != null)
+                .findFirst()
+                .orElse(null);
+    }
+
+    private List<SearchCondition> sanitizeConditions(List<SearchCondition> conditions,
+                                                     List<Predicate<SearchCondition>> excludePredicates) {
         if (conditions == null) {
             return new ArrayList<>();
-        }
-        if (excludePredicates == null) {
-            return conditions;
         }
         return conditions.stream()
                 .filter(condition -> excludePredicates.stream()
@@ -131,22 +121,41 @@ final class RocketComposerServiceWorker {
                 .toList();
     }
 
-    Rocket filterRockets(List<Rocket> rockets, List<SearchCondition> conditions) {
-        if (rockets != null) {
-            return rockets.stream()
-                    .filter(rocket -> filterRocket(rocket, conditions) != null)
-                    .findFirst()
-                    .orElse(null);
+    private SearchCondition[] findMainRocketSearchConditions(List<SearchCondition> conditions,
+                                                             Predicate<SearchCondition> hasType,
+                                                             Predicate<SearchCondition> hasMissionName) {
+        SearchCondition[] mainConditions = new SearchCondition[2];
+
+        SearchCondition typeCondition = null;
+        SearchCondition missionNameCondition = null;
+
+        int foundConditions = 0;
+        Iterator<SearchCondition> iterator = conditions.listIterator();
+        while (foundConditions < 2 && iterator.hasNext()) {
+            SearchCondition condition = iterator.next();
+            if (hasType != null && hasType.test(condition)) {
+                typeCondition = condition;
+                foundConditions++;
+            } else if (hasMissionName != null && hasMissionName.test(condition)) {
+                missionNameCondition = condition;
+                foundConditions++;
+            }
         }
-        return null;
+
+        mainConditions[0] = typeCondition;
+        mainConditions[1] = missionNameCondition;
+
+        return mainConditions;
     }
 
-    boolean checkCondition(Rocket rocket, SearchCondition condition) {
+    private Rocket filterRocket(Rocket rocket, List<SearchCondition> conditions) {
+        boolean everythingMatches = conditions.stream().allMatch(condition -> checkCondition(rocket, condition));
+        return everythingMatches ? rocket : null;
+    }
+
+    private boolean checkCondition(Rocket rocket, SearchCondition condition) {
         if (rocket == null) {
             return false;
-        }
-        if (condition == null) {
-            return true;
         }
 
         String parameterValue;
@@ -155,7 +164,7 @@ final class RocketComposerServiceWorker {
         } else if (condition.isAttributeNameSimilar("missionName")) {
             parameterValue = rocket.getMissionName();
         } else if (condition.isAttributeNameSimilar("spaceport")) {
-            parameterValue = rocket.getSpaceport().toString();
+            parameterValue = Objects.toString(rocket.getSpaceport(), null);
         } else {
             parameterValue = rocket.getParameters().get(condition.attributeName());
         }
@@ -169,7 +178,7 @@ final class RocketComposerServiceWorker {
         return isSatisfied;
     }
 
-    boolean checkParameter(String paramValue, SearchCondition condition) {
+    private boolean checkParameter(String paramValue, SearchCondition condition) {
         boolean isSatisfied = false;
         String value = String.valueOf(condition.value());
 
@@ -182,26 +191,20 @@ final class RocketComposerServiceWorker {
             case NOT_EQUALS -> isSatisfied = !Objects.equals(value, paramValue);
             case EQUALS -> isSatisfied = Objects.equals(value, paramValue);
             case LIKE -> isSatisfied = paramValue.contains(value);
-            case LESSER_THAN -> isSatisfied = new BigDecimal(paramValue).compareTo(new BigDecimal(value)) < 0;
-            case GREATER_THAN -> isSatisfied = new BigDecimal(paramValue).compareTo(new BigDecimal(value)) > 0;
-            case LESSER_OR_EQUALS_THAN ->
-                    isSatisfied = new BigDecimal(paramValue).compareTo(new BigDecimal(value)) <= 0;
-            case GREATER_OR_EQUALS_THAN ->
-                    isSatisfied = new BigDecimal(paramValue).compareTo(new BigDecimal(value)) >= 0;
+            case LESSER_THAN -> isSatisfied = compareParamAndConditionValues(paramValue, value) < 0;
+            case GREATER_THAN -> isSatisfied = compareParamAndConditionValues(paramValue, value) > 0;
+            case LESSER_OR_EQUALS_THAN -> isSatisfied = compareParamAndConditionValues(paramValue, value) <= 0;
+            case GREATER_OR_EQUALS_THAN -> isSatisfied = compareParamAndConditionValues(paramValue, value) >= 0;
         }
         return isSatisfied;
     }
 
-    boolean checkSatellite(Rocket rocket, SearchCondition condition) {
-        Predicate<String> satelliteParameterCondition = (parameter) -> {
-            boolean isParameterSatisfying;
-            switch (condition.condition()) {
-                case NOT_EQUALS -> isParameterSatisfying = !Objects.equals(condition.value(), parameter);
-                case EQUALS -> isParameterSatisfying = Objects.equals(condition.value(), parameter);
-                case LIKE -> isParameterSatisfying = parameter.contains(condition.value().toString());
-                default -> isParameterSatisfying = false;
-            }
-            return isParameterSatisfying;
+    private boolean checkSatellite(Rocket rocket, SearchCondition condition) {
+        Predicate<String> satelliteParameterCondition = (parameter) -> switch (condition.condition()) {
+            case NOT_EQUALS -> !Objects.equals(condition.value(), parameter);
+            case EQUALS -> Objects.equals(condition.value(), parameter);
+            case LIKE -> Objects.toString(parameter, "").contains(condition.value().toString());
+            default -> false;
         };
 
         boolean isSatisfied = false;
@@ -219,17 +222,5 @@ final class RocketComposerServiceWorker {
                     .anyMatch(satelliteParameterCondition);
         }
         return isSatisfied;
-    }
-
-    static boolean isNumeric(String valueToCheck) {
-        if (valueToCheck == null) {
-            return true;
-        }
-        try {
-            Double.parseDouble(valueToCheck.toLowerCase());
-            return true;
-        } catch (NumberFormatException e) {
-            return false;
-        }
     }
 }

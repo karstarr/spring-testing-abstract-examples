@@ -3,6 +3,7 @@ package com.griddynamics.akarsakov.services;
 import com.griddynamics.akarsakov.entities.Rocket;
 import com.griddynamics.akarsakov.entities.Satellite;
 import com.griddynamics.akarsakov.repositories.RocketRepository;
+import com.griddynamics.akarsakov.services.search.SearchCondition;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Tag;
@@ -14,6 +15,7 @@ import java.util.*;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.when;
 
 @Tag("unitTest")
 class RocketComposerServiceImplTest {
@@ -38,6 +40,17 @@ class RocketComposerServiceImplTest {
     void cleanup() {
         satellite = null;
         rocket = null;
+    }
+
+    @Test
+    void getFirstRocketByConditions() {
+        List<SearchCondition> conditions = List.of(
+                new SearchCondition("delta-V", SearchCondition.Condition.EQUALS, 1500)
+        );
+
+        when(repositoryMock.findAll()).thenReturn(List.of(rocket));
+
+        assertEquals(rocket, service.getFirstRocketByConditions(conditions));
     }
 
     @Test
